@@ -5,21 +5,22 @@ This repository contains a curated list of recommended readings focused on Auton
 ## Recommended Reading Order
 
 1. **Fundamentals of Self-Driving Cars (SDCs)**
-   - *Applied Deep Learning and Computer Vision for Self-Driving Cars*  
-     - Type: Book Chapter
-     - Authors: S. Ranjan, S. Senthamilarasu (2020)  
-     - Chapter 1: Fundamentals of SDCs
+    - *Applied Deep Learning and Computer Vision for Self-Driving Cars*  
+      - Type: Book Chapter
+      - Authors: S. Ranjan, S. Senthamilarasu (2020)  
+      - Chapter 1: Fundamentals of SDCs
 
 2. **Social and Technological Trends in SDCs**
-  - *The Long Journey of the Driverless Car*
-    - Type: Paper
-    - Author: C. Wolmar (2021)
-  - *Future Mobility Advances and Trends*  
-    - Type: Paper
-    - Authors: M. Longo, W. Yaici, F. Foiaedelli (2021)
-  - *Artificial Intelligence in Self Driving Cars*
-    - Type: Paper
-    - Authors: Karnati, A., Mehta, D., Manu, K.S. (2022).
+    - *The Long Journey of the Driverless Car*
+      - Type: Paper
+      - Author: C. Wolmar (2021)
+    - *Future Mobility Advances and Trends*  
+      - Type: Paper
+      - Authors: M. Longo, W. Yaici, F. Foiaedelli (2021)
+    - *Artificial Intelligence in Self Driving Cars*
+      - Type: Paper
+      - Authors: Karnati, A., Mehta, D., Manu, K.S. (2022).
+
 ---
 
 ## How to Extend
