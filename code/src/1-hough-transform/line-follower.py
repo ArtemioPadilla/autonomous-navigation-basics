@@ -9,10 +9,25 @@ from collections import deque
 
 # Enhanced Hybrid Position+Angle PID Controller
 class SteeringController:
-    def __init__(self, max_steering_angle=0.5, dead_zone=0.05, 
-                 Kp_angle=0.12, Ki_angle=0.0005, Kd_angle=0.07,
-                 Kp_position=0.1, Ki_position=0.005, Kd_position=0.01, 
+    def __init__(self, max_steering_angle=0.75, dead_zone=0.05, 
+                 Kp_angle=0.3, Ki_angle=0.05, Kd_angle=0.07,
+                 Kp_position=0.5, Ki_position=0.05, Kd_position=0.2, 
                  smoothing=0.12, position_weight=0.5, monitor=None):
+        """
+        Initialize the PID controller with given parameters.
+        :param max_steering_angle: Maximum steering angle in radians.
+        :param
+        :param dead_zone: Dead zone for angle control.
+        :param Kp_angle: Proportional gain for angle control.
+        :param Ki_angle: Integral gain for angle control.
+        :param Kd_angle: Derivative gain for angle control.
+        :param Kp_position: Proportional gain for position control.
+        :param Ki_position: Integral gain for position control.
+        :param Kd_position: Derivative gain for position control.
+        :param smoothing: Smoothing factor for steering output.
+        :param position_weight: Weight for position control (0-1).
+        :param monitor: Optional monitor for real-time PID visualization.
+        """
         # Steering limits
         self.max_steering = max_steering_angle
         self.dead_zone = dead_zone
@@ -22,10 +37,10 @@ class SteeringController:
         self.Ki_angle = Ki_angle
         self.Kd_angle = Kd_angle
         
-        # Position PID parameters - significantly increased
-        self.Kp_position = Kp_position    # Much higher position P gain
-        self.Ki_position = Ki_position    # Much higher position I gain
-        self.Kd_position = Kd_position    # Higher position D gain
+        # Position PID parameters
+        self.Kp_position = Kp_position
+        self.Ki_position = Ki_position
+        self.Kd_position = Kd_position
         
         # Smoothing factor
         self.smoothing = smoothing
@@ -50,20 +65,19 @@ class SteeringController:
         self.monitor = monitor
 
     def compute(self, raw_angle, position_offset):
-        # IMPORTANT: Position offset is how far the line is from the center
-        # Positive offset means line is to the RIGHT of center
-        # Negative offset means line is to the LEFT of center
+        # Position offset interpretation:
+        # Positive offset = line is to the RIGHT of center
+        # Negative offset = line is to the LEFT of center
+        #
+        # Steering interpretation:
+        # Positive steering = turning RIGHT
+        # Negative steering = turning LEFT
         
-        # For steering:
-        # Positive steering angle means turning RIGHT
-        # Negative steering angle means turning LEFT
-        
-        # Therefore, to center on the line:
-        # If line is to the RIGHT (positive offset), we need to steer RIGHT (positive steering)
-        # If line is to the LEFT (negative offset), we need to steer LEFT (negative steering)
-        
-        # Normalize position offset to be in a similar range as angle (-1 to 1)
+        # Normalize position offset to range (-1 to 1)
         normalized_position = position_offset / 128.0
+        
+        # Invert raw angle to correct steering direction
+        raw_angle = -raw_angle
         
         # Apply dead zone to angle
         if abs(raw_angle) < self.dead_zone:
@@ -88,8 +102,8 @@ class SteeringController:
             self.integral_angle *= 0.7
             self.integral_position *= 0.7
 
-        # ===== ANGLE PID CONTROL =====
-        # Proporcional
+        # ANGLE PID CONTROL
+        # Proportional
         angle_p = self.Kp_angle * angle_for_control
         
         # Integral with anti-windup
@@ -108,12 +122,11 @@ class SteeringController:
         # Total angle component
         angle_control = angle_p + angle_i + angle_d
         
-        # ===== POSITION PID CONTROL =====
-        # For position control: We want to steer TOWARD the line
-        # So if position_offset is positive (line to the right), we steer right (positive)
-        # This means we use the raw position value directly (no negation needed)
+        # POSITION PID CONTROL
+        # For position: Steer toward the line (no negation needed)
+        # Positive offset (line to right) = steer right (positive)
         
-        # Proportional - directly use normalized position (no negation)
+        # Proportional
         position_p = self.Kp_position * normalized_position
         
         # Integral - only accumulate when position error is significant
@@ -163,7 +176,7 @@ class SteeringController:
         
         return steering
 
-# Add a class for real-time PID monitoring
+# Monitor class for real-time PID visualization
 class PIDMonitor:
     def __init__(self, max_points=100):
         self.max_points = max_points
@@ -320,13 +333,13 @@ class PIDMonitor:
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 
-# Getting image from camera
+# Get image from camera
 def get_image(camera):
     raw_image = camera.getImage()
     image = np.frombuffer(raw_image, np.uint8).reshape(
         (camera.getHeight(), camera.getWidth(), 4)
     )
-    return image[:, :, :3]  # Drop alpha
+    return image[:, :, :3]  # Drop alpha channel
 
 # Image processing config
 rho = 1
@@ -337,7 +350,7 @@ max_line_gap = 40
 alpha = 1
 beta = 1
 gamma = 1
-last_angle = 0.0  # Ensure the initial angle is zero to prevent immediate turning
+last_angle = 0.0  # Initial angle is zero to prevent immediate turning
 position_weight = 0.7  # Global variable to share controller weight with display
 
 # ROI mask
@@ -345,35 +358,35 @@ ROI_MASK = np.zeros((128, 256), dtype=np.uint8)
 vertices = np.array([[(0,128),(0, 100), (100, 80), (156,80), (256,100), (256,128)]], dtype=np.int32)
 cv2.fillPoly(ROI_MASK, vertices, 255)
 
-# Image processing
+# Process image for line detection and visualization
 def process_image(image, final_steering=None, raw_angle=None):
     global last_angle
 
     # Create a copy of the original image for visualization
     img_display = image.copy()
     
+    # Initialize raw_line_angle for all code paths
+    raw_line_angle = 0.0
+    
     # Visualize ROI with transparency
     roi_display = np.zeros_like(image, dtype=np.uint8)
-    # Fill the ROI polygon with a semi-transparent blue color
-    cv2.fillPoly(roi_display, [vertices], (100, 50, 0))  # BGR format, reddish-brown
-    # Blend ROI visualization with original image
+    cv2.fillPoly(roi_display, [vertices], (100, 50, 0))  # Semi-transparent reddish-brown
     img_display = cv2.addWeighted(img_display, 1, roi_display, 0.3, 0)
 
-    # Convertir imagen a HSV y filtrar color amarillo
+    # Convert image to HSV and filter yellow color
     img_hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    # Adjusted yellow detection range for better detection
     lower_yellow = np.array([15, 70, 70])
     upper_yellow = np.array([45, 255, 255])
     mask_yellow = cv2.inRange(img_hsv, lower_yellow, upper_yellow)
     yellow_only = cv2.bitwise_and(image, image, mask=mask_yellow)
 
-    # Preprocesamiento: gris -> blur -> Canny -> ROI
+    # Preprocessing: grayscale -> blur -> Canny -> apply ROI mask
     gray_img = cv2.cvtColor(yellow_only, cv2.COLOR_BGR2GRAY)
     img_blur = cv2.GaussianBlur(gray_img, (5, 5), 0)
     img_canny = cv2.Canny(img_blur, 50, 350)
     img_mask = cv2.bitwise_and(img_canny, ROI_MASK)
 
-    # Detección de líneas con Hough
+    # Line detection using Hough transform
     lines = cv2.HoughLinesP(
         img_mask, rho, theta, threshold, np.array([]),
         minLineLength=min_line_len, maxLineGap=max_line_gap
@@ -395,10 +408,10 @@ def process_image(image, final_steering=None, raw_angle=None):
         left_lines = []
         all_lines = []
         
-        # Separate lines based on their position and slope
+        # Process detected lines
         for line in lines:
             for x1, y1, x2, y2 in line:
-                cv2.line(img_lines, (x1, y1), (x2, y2), [255, 0, 0], 3)  # líneas en azul
+                cv2.line(img_lines, (x1, y1), (x2, y2), [255, 0, 0], 3)  # Blue lines
                 all_lines.append((x1, y1, x2, y2))
                 
                 # Determine if line is left or right of center
@@ -408,15 +421,31 @@ def process_image(image, final_steering=None, raw_angle=None):
                 else:
                     right_lines.append((x1, y1, x2, y2))
 
-                # Calcular longitud y ángulo de la línea
+                # Calculate length and angle of the line
                 length = np.hypot(x2 - x1, y2 - y1)
+                
+                # Calculate angle using arctan2 (angle relative to horizontal axis)
                 angle_rad = np.arctan2(y2 - y1, x2 - x1)
-
-                # Seleccionar la línea más larga
+                
+                # Convert to vertical-relative angle
+                # Subtract π/2 (90 degrees) to make vertical = 0 degrees
+                vertical_relative_angle = angle_rad - (np.pi/2)
+                
+                # Normalize the angle to prevent jumps between -180 and 180 degrees
+                vertical_relative_angle = normalize_angle(vertical_relative_angle)
+                
+                # Filter out perpendicular lines (horizontal lines on the road)
+                # These are likely crosswalks or lane markers perpendicular to travel direction
+                horizontal_threshold = np.pi/4  # 45 degrees from horizontal
+                if abs(vertical_relative_angle) > horizontal_threshold:
+                    # Skip this line as it's too horizontal/perpendicular to the expected lane
+                    continue
+                
+                # Store the longest line's angle
                 if length > longest_length:
                     longest_length = length
-                    best_angle = angle_rad
-                    # Calculate position offset based on the longest line
+                    best_angle = vertical_relative_angle
+                    raw_line_angle = vertical_relative_angle
                     lane_position_offset = ((x1 + x2) / 2) - center_x
 
         # Sort lines by y position
@@ -427,116 +456,118 @@ def process_image(image, final_steering=None, raw_angle=None):
             x1_start, y1_start, _, _ = all_lines[0]
             _, _, x2_end, y2_end = all_lines[-1]
             
-            cv2.line(img_lines, (x1_start, y1_start), (x2_end, y2_end), (0, 255, 0), 3)  # línea conectada en verde
+            cv2.line(img_lines, (x1_start, y1_start), (x2_end, y2_end), (0, 255, 0), 3)  # Green line
             
             # Calculate angle between connected line and vertical
             dx = x2_end - x1_start
             dy = y2_end - y1_start
             connected_angle = np.arctan2(dy, dx)
             
+            # Convert connected angle to be relative to vertical
+            connected_vertical_angle = connected_angle - (np.pi/2)
+            
             # Use the connected line's angle if it's significant
             if longest_length > 50:
-                best_angle = connected_angle
+                best_angle = connected_vertical_angle
+                raw_line_angle = connected_vertical_angle
 
         last_angle = best_angle
     else:
-        best_angle = 0.0  # Default to straight if no lines are detected
-    # Calculate the angle for steering with adjustments based on lane position
+        best_angle = 0.0  # Default to straight if no lines detected
+        raw_line_angle = 0.0
+        
+    # Calculate steering angle with position adjustment
     # Positive = turn right, Negative = turn left
     position_correction = lane_position_offset * 0.001  # Small correction based on position
+    
+    # Steering is opposite to line lean
     steering_angle = -best_angle + position_correction
 
-    # Añadir vector direccional del vehículo - now using final_steering when available
-    center_x, center_y = w // 2, h - 20  # Punto de origen del vector (parte inferior central)
+    # Add vehicle direction vector
+    center_x, center_y = w // 2, h - 20  # Origin point at bottom center
     
-    # Use the actual final steering angle if provided (this comes from the PID controller output)
+    # Use actual final steering angle if provided
     display_angle = final_steering if final_steering is not None else steering_angle
     
-    # Draw a simpler and clearer representation of the steering angle
+    # Draw a representation of the steering angle
+    vector_length = 30  # Fixed vector length
+    angle_radians = display_angle
     
-    # Scale the vector based on the magnitude of the steering angle
-    vector_length = 30  # Fixed vector length for consistent visualization
-    angle_radians = display_angle  # Use the steering angle directly
-    
-    # Calculate the end point of the arrow based on the steering angle
-    multiplier = 20  # Adjust this multiplier for better visualization
+    # Calculate arrow endpoint based on steering angle
+    multiplier = 20
     end_x = center_x + int(multiplier * vector_length * np.sin(angle_radians))
     end_y = center_y - int(vector_length * np.cos(angle_radians))
     
-    # set a maximum length for the arrow
+    # Set maximum length for the arrow
     max_length = 50
     if abs(end_x - center_x) > max_length:
         end_x = center_x + int(max_length * np.sign(end_x - center_x))
 
-    # Convert coordinates to integers for OpenCV
+    # Convert coordinates to integers
     center_x_int = int(center_x)
     center_y_int = int(center_y)
     end_x_int = int(end_x)
     end_y_int = int(end_y)
     
-    # Draw the directional arrow - red for clarity
-    cv2.arrowedLine(img_lines, (center_x_int, center_y_int), (end_x_int, end_y_int), (0, 0, 255), 2, tipLength=0.3)  # Thinner line
-    # Circle at origin
-    cv2.circle(img_lines, (center_x_int, center_y_int), 3, (0, 0, 255), -1)  # Smaller circle
+    # Draw directional arrow
+    cv2.arrowedLine(img_lines, (center_x_int, center_y_int), (end_x_int, end_y_int), (0, 0, 255), 2, tipLength=0.3)
+    cv2.circle(img_lines, (center_x_int, center_y_int), 3, (0, 0, 255), -1)
     
-    # Añadir marcador de ángulo con arco y valor numérico
+    # Add angle marker with arc and numeric value
     angle_degrees = np.degrees(display_angle)
     
-    # Dibujamos un arco que representa el ángulo
+    # Draw arc representing the angle
     radius = 25
-    start_angle = 90  # Comenzamos desde la vertical (90 grados)
-    end_angle = 90 - angle_degrees  # El ángulo final
+    start_angle = 90  # Start from vertical
+    end_angle = 90 - angle_degrees  # End angle
     
-    # Determinar el color del arco según la dirección (verde para derecha, azul para izquierda)
+    # Determine arc color by direction (green for right, orange for left)
     arc_color = (0, 255, 0) if angle_degrees > 0 else (255, 165, 0)
     
-    # Dibujamos el arco
+    # Draw the arc
     cv2.ellipse(img_lines, (center_x, center_y), (radius, radius), 
                 0, start_angle, end_angle, arc_color, 2)
     
-    if raw_angle:
-        raw_angle_degrees = np.degrees(raw_angle)
-        # Replace degree symbol with "deg" text to avoid encoding issues - smaller version
-        angle_text = f"{raw_angle_degrees:.1f} deg (raw)"
+    if best_angle:
+        vertical_relative_angle = best_angle
+        vertical_relative_angle_degrees = np.degrees(vertical_relative_angle)
+        # Display raw angle
+        angle_text = f"{vertical_relative_angle_degrees:.1f} deg (line)"
         text_position = (center_x + 30, center_y - 10)
         cv2.putText(img_lines, angle_text, text_position, 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
     
-    # Replace degree symbol with "deg" text to avoid encoding issues - smaller version
-    angle_text = f"{angle_degrees:.1f} deg"
-    text_position = (center_x-10, center_y + 10)
+    # Display steering angle
+    angle_text = f"{angle_degrees:.1f} deg (steering)"
+    text_position = (center_x-20, center_y + 10)
     cv2.putText(img_lines, angle_text, text_position, 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
     
-    # Add position offset indicator - smaller and more compact
+    # Display position offset
     offset_text = f"Off: {lane_position_offset:.1f}px"
     offset_position = (center_x - 80, center_y - 10)
     cv2.putText(img_lines, offset_text, offset_position, 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Add indicator to show final vs raw steering when applicable - smaller version
+    # Indicate if showing final vs raw steering
     if final_steering is not None:
         cv2.putText(img_lines, "FINAL", (center_x - 20, center_y + 25), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1, cv2.LINE_AA)
     
     # Smaller radius for the angle arc
     radius = 20
-    start_angle = 90  # Comenzamos desde la vertical (90 grados)
-    end_angle = 90 - angle_degrees  # El ángulo final
+    start_angle = 90
+    end_angle = 90 - angle_degrees
     
-    # Determinar el color del arco según la dirección (verde para derecha, azul para izquierda)
-    arc_color = (0, 255, 0) if angle_degrees > 0 else (255, 165, 0)
-    
-    # Dibujamos el arco - thinner line
+    # Draw the arc with thinner line
     cv2.ellipse(img_lines, (center_x, center_y), (radius, radius), 
                 0, start_angle, end_angle, arc_color, 1)
     
-    # Add controller position/angle influence display - smaller more compact version
+    # Display controller mix info
     if 'position_weight' in globals():
         pos_pct = int(position_weight * 100)
         ang_pct = 100 - pos_pct
         
-        # Create a more compact format for controller mix info
         cv2.putText(img_lines, f"Controller Mix:", (5, 15), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (220, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(img_lines, f"Position: {pos_pct}%", (5, 25), 
@@ -544,13 +575,13 @@ def process_image(image, final_steering=None, raw_angle=None):
         cv2.putText(img_lines, f"Angle: {ang_pct}%", (5, 35), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 255), 1, cv2.LINE_AA)
 
-    # Combine the original image (with transparent ROI) with the lines visualization
+    # Combine images
     img_lane_lines = cv2.addWeighted(img_display, alpha, img_lines, beta, gamma)
     
-    # Retornamos la imagen procesada y el ángulo para el controlador PID
+    # Return processed image and control values
     return img_lane_lines, steering_angle, lane_position_offset
 
-# Display
+# Display the image
 def display_image(display, image):
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image_ref = display.imageNew(
@@ -561,9 +592,24 @@ def display_image(display, image):
     )
     display.imagePaste(image_ref, 0, 0, False)
 
-# Main
+def normalize_angle(angle):
+    """
+    Normalize angle to be in the range [-π/2, π/2] to prevent jumps 
+    between -180 and 180 degrees.
+    """
+    # First ensure the angle is in the range [-π, π]
+    angle = np.arctan2(np.sin(angle), np.cos(angle))
+    
+    # Handle the case where angles near -π/2 and π/2 might jump
+    if angle > np.pi/2:
+        angle = angle - np.pi
+    elif angle < -np.pi/2:
+        angle = angle + np.pi
+        
+    return angle
+
+# Main function
 def main():
-    # Declare global variable at the beginning of the function
     global position_weight
     
     robot = Car()
@@ -581,14 +627,13 @@ def main():
     speed = 80  # Moderate speed for testing
     pid_monitor = PIDMonitor()
     
-    # Initialize the hybrid controller with position-heavy weights
-    # These parameters are significantly higher for position controller
+    # Initialize hybrid controller with position-heavy weights
     controller = SteeringController(
-        max_steering_angle=0.75,
-        Kp_angle=0.12, Ki_angle=0.0005, Kd_angle=0.06,
-        Kp_position=0.3, Ki_position=0.01, Kd_position=0.02,
-        position_weight=0.7,  # 70% position, 30% angle - stronger position influence
-        smoothing=0.15,
+        max_steering_angle=0.75, dead_zone=0.05, 
+        Kp_angle=0.3, Ki_angle=0.05, Kd_angle=0.07,
+        Kp_position=0.5, Ki_position=0.05, Kd_position=0.2, 
+        position_weight=0.7,  # 70% position, 30% angle
+        smoothing=0.1,
         monitor=pid_monitor
     )
 
@@ -603,13 +648,14 @@ def main():
     while robot.step() != -1:
         image = get_image(camera)
         
-        # First call process_image to get the raw angle and position_offset
+        # Get raw angle and position_offset
         processed_img, raw_angle, position_offset = process_image(image)
         
-        # Compute the final steering angle using the controller
-        steering_angle = controller.compute(raw_angle, position_offset)
+        # Compute final steering angle using controller
+        offset_target = 0
+        steering_angle = controller.compute(raw_angle, position_offset - offset_target)
         
-        # Process the image again with the final steering angle for display
+        # Process image again with final steering angle for display
         processed_img_with_steering, _, _ = process_image(image, final_steering=steering_angle, raw_angle=raw_angle)
         
         # Display the image with the final steering vector
@@ -622,7 +668,7 @@ def main():
             print("Image taken")
             camera.saveImage(os.getcwd() + "/" + file_name, 1)
             processed_img = cv2.cvtColor(processed_img_with_steering, cv2.COLOR_BGR2RGB)
-        # Keyboard controls for adjusting the position vs angle balance
+        # Keyboard controls for adjusting position vs angle balance
         elif key == ord('P'):
             controller.position_weight = min(1.0, controller.position_weight + 0.1)
             # Update global variable to reflect in display
@@ -634,7 +680,7 @@ def main():
             position_weight = controller.position_weight
             print(f"Angle influence increased: {controller.position_weight*100:.0f}% position, {(1-controller.position_weight)*100:.0f}% angle")
 
-        # Apply the final steering angle to the vehicle
+        # Apply steering angle to vehicle
         driver.setSteeringAngle(steering_angle)
         driver.setCruisingSpeed(speed)
 
