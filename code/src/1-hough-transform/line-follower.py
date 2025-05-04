@@ -178,7 +178,7 @@ class SteeringController:
 
 # Monitor class for real-time PID visualization
 class PIDMonitor:
-    def __init__(self, max_points=100):
+    def __init__(self, max_points=1000):
         self.max_points = max_points
         # Angle PID data
         self.angle_errors = deque(maxlen=max_points)
@@ -342,18 +342,19 @@ def get_image(camera):
     return image[:, :, :3]  # Drop alpha channel
 
 # Image processing config
-rho = 1
-theta = np.pi / 180
-threshold = 15
-min_line_len = 30
-max_line_gap = 40
-alpha = 1
-beta = 1
-gamma = 1
+rho = 1  # Distance resolution of the accumulator in pixels
+theta = np.pi / 180  # Angle resolution of the accumulator in radians (1 degree)
+threshold = 15  # Accumulator threshold parameter. Only lines with enough votes get returned
+min_line_len = 30  # Minimum line length. Line segments shorter than this are rejected
+max_line_gap = 40  # Maximum allowed gap between points on the same line to link them
+alpha = 1  # Weight of the original image when combining with the line image
+beta = 1   # Weight of the line image when combining with the original image
+gamma = 1  # Added to the sum of the above
 last_angle = 0.0  # Initial angle is zero to prevent immediate turning
 position_weight = 0.7  # Global variable to share controller weight with display
 
-# ROI mask
+# ROI mask definition - This restricts line detection to relevant areas of the road
+# The polygon defines a trapezoid shape that covers the lower portion of the image where road lines are expected
 ROI_MASK = np.zeros((128, 256), dtype=np.uint8)
 vertices = np.array([[(0,128),(0, 100), (100, 80), (156,80), (256,100), (256,128)]], dtype=np.int32)
 cv2.fillPoly(ROI_MASK, vertices, 255)
@@ -373,23 +374,106 @@ def process_image(image, final_steering=None, raw_angle=None):
     cv2.fillPoly(roi_display, [vertices], (100, 50, 0))  # Semi-transparent reddish-brown
     img_display = cv2.addWeighted(img_display, 1, roi_display, 0.3, 0)
 
-    # Convert image to HSV and filter yellow color
+    # ZEBRA CROSSING DETECTION
+    # Get region of interest area for calculations
+    roi_area = np.sum(ROI_MASK > 0)
+    
+    # Convert image to HSV and filter yellow color (to isolate the yellow lane lines and zebra crossings)
     img_hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     lower_yellow = np.array([15, 70, 70])
     upper_yellow = np.array([45, 255, 255])
     mask_yellow = cv2.inRange(img_hsv, lower_yellow, upper_yellow)
+    
+    # Apply ROI mask to yellow mask
+    mask_yellow_roi = cv2.bitwise_and(mask_yellow, ROI_MASK)
+    
+    # Count yellow pixels in the lower part of ROI to detect zebra crossings
+    # Create a mask for the bottom third of the ROI where zebras typically appear
+    lower_roi_mask = np.zeros_like(ROI_MASK)
+    lower_roi_mask[ROI_MASK.shape[0]-40:, :] = ROI_MASK[ROI_MASK.shape[0]-40:, :]
+    
+    # Apply lower ROI mask to yellow mask
+    mask_yellow_lower = cv2.bitwise_and(mask_yellow, lower_roi_mask)
+    
+    # Count yellow pixels in lower part and calculate density
+    yellow_pixel_count_lower = np.sum(mask_yellow_lower > 0)
+    yellow_pixel_percentage_lower = (yellow_pixel_count_lower / np.sum(lower_roi_mask > 0)) * 100 if np.sum(lower_roi_mask > 0) > 0 else 0
+    
+    # Detect zebra crossing based on high density of yellow pixels in lower region
+    on_zebra_crossing = yellow_pixel_percentage_lower > 25  # Threshold percentage
+    
+    # Count total yellow pixels for line detection quality assessment
+    yellow_pixel_count = np.sum(mask_yellow_roi > 0)
+    yellow_pixel_percentage = (yellow_pixel_count / roi_area) * 100
+    
+    # Create a copy of the yellow mask for zebra pattern detection
+    yellow_mask_for_pattern = mask_yellow.copy()
+    
+    # If detected probable zebra crossing, analyze the pattern
+    if on_zebra_crossing:
+        # Erode the yellow mask to separate the stripes
+        kernel = np.ones((1, 3), np.uint8)  # Horizontal kernel to separate vertical edges
+        eroded_yellow = cv2.erode(yellow_mask_for_pattern, kernel, iterations=1)
+        
+        # Find contours - each zebra strip should be a separate contour
+        contours, _ = cv2.findContours(eroded_yellow & lower_roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Count contours in lower part that meet zebra strip criteria
+        strip_count = 0
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            # Check if the shape is rectangular and appropriate size for zebra strip
+            aspect_ratio = float(w) / h if h > 0 else 0
+            area = w * h
+            if area > 20 and aspect_ratio > 1.5:  # Wide and short rectangles
+                strip_count += 1
+        
+        # Confirm zebra crossing based on strip pattern
+        on_zebra_crossing = on_zebra_crossing and strip_count > 2
+    
+    # Prepare yellow pixels for line detection
     yellow_only = cv2.bitwise_and(image, image, mask=mask_yellow)
 
-    # Preprocessing: grayscale -> blur -> Canny -> apply ROI mask
-    gray_img = cv2.cvtColor(yellow_only, cv2.COLOR_BGR2GRAY)
+    # If on a zebra crossing, we need to filter out the zebra stripes
+    if on_zebra_crossing:
+        # Create a mask that excludes the bottom part where zebra crossings are
+        upper_part_mask = np.zeros_like(ROI_MASK)
+        upper_part_mask[:ROI_MASK.shape[0]-35, :] = ROI_MASK[:ROI_MASK.shape[0]-35, :]
+        
+        # Apply the upper part mask to get only upper yellow lines (lane markers, not zebras)
+        yellow_only_filtered = cv2.bitwise_and(yellow_only, yellow_only, mask=upper_part_mask)
+        
+        # Use this filtered image for line detection
+        gray_img = cv2.cvtColor(yellow_only_filtered, cv2.COLOR_BGR2GRAY)
+    else:
+        # Normal processing without zebra filtering
+        gray_img = cv2.cvtColor(yellow_only, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
     img_blur = cv2.GaussianBlur(gray_img, (5, 5), 0)
+    
+    # Apply Canny edge detection to find edges
     img_canny = cv2.Canny(img_blur, 50, 350)
+    
+    # Apply ROI mask to focus only on relevant road area
     img_mask = cv2.bitwise_and(img_canny, ROI_MASK)
 
-    # Line detection using Hough transform
+    # Line detection using Hough Transform with parameters that depend on zebra crossing detection
+    if on_zebra_crossing:
+        # More strict parameters when on zebra crossings
+        min_line_length = 40  # Longer minimum line length
+        max_line_gap_val = 20  # Smaller gap to avoid connecting zebra strips
+        threshold_val = 25     # Higher threshold for more confident lines
+    else:
+        # Standard parameters for normal road conditions
+        min_line_length = min_line_len
+        max_line_gap_val = max_line_gap
+        threshold_val = threshold
+    
+    # Get lines with appropriate parameters
     lines = cv2.HoughLinesP(
-        img_mask, rho, theta, threshold, np.array([]),
-        minLineLength=min_line_len, maxLineGap=max_line_gap
+        img_mask, rho, theta, threshold_val, np.array([]),
+        minLineLength=min_line_length, maxLineGap=max_line_gap_val
     )
 
     img_lines = np.zeros((img_mask.shape[0], img_mask.shape[1], 3), dtype=np.uint8)
@@ -402,7 +486,11 @@ def process_image(image, final_steering=None, raw_angle=None):
     # Position offset from center
     lane_position_offset = 0
 
+    # Process the detected lines to determine steering angle
     if lines is not None:
+        # Number of lines detected by Hough Transform
+        num_lines_detected = len(lines)
+        
         longest_length = 0
         right_lines = []
         left_lines = []
@@ -427,6 +515,13 @@ def process_image(image, final_steering=None, raw_angle=None):
                 # Calculate angle using arctan2 (angle relative to horizontal axis)
                 angle_rad = np.arctan2(y2 - y1, x2 - x1)
                 
+                # Filter out horizontal lines (which can cause erratic steering)
+                # Calculate angle from horizontal (0 degrees is horizontal)
+                angle_from_horizontal = abs(angle_rad)  # This will be close to 0 for horizontal lines
+                if angle_from_horizontal < 0.3 or angle_from_horizontal > (np.pi - 0.3):
+                    # Skip nearly horizontal lines (±17 degrees from horizontal)
+                    continue
+                
                 # Convert to vertical-relative angle
                 # Subtract π/2 (90 degrees) to make vertical = 0 degrees
                 vertical_relative_angle = angle_rad - (np.pi/2)
@@ -434,12 +529,6 @@ def process_image(image, final_steering=None, raw_angle=None):
                 # Normalize the angle to prevent jumps between -180 and 180 degrees
                 vertical_relative_angle = normalize_angle(vertical_relative_angle)
                 
-                # Filter out perpendicular lines (horizontal lines on the road)
-                # These are likely crosswalks or lane markers perpendicular to travel direction
-                horizontal_threshold = np.pi/4  # 45 degrees from horizontal
-                if abs(vertical_relative_angle) > horizontal_threshold:
-                    # Skip this line as it's too horizontal/perpendicular to the expected lane
-                    continue
                 
                 # Store the longest line's angle
                 if length > longest_length:
@@ -448,14 +537,16 @@ def process_image(image, final_steering=None, raw_angle=None):
                     raw_line_angle = vertical_relative_angle
                     lane_position_offset = ((x1 + x2) / 2) - center_x
 
-        # Sort lines by y position
+        # Sort lines by y position (from top to bottom)
         if all_lines:
             all_lines.sort(key=lambda line: min(line[1], line[3]))
             
             # Get top and bottom points of the detected line
+            # This creates a single line representing the lane direction
             x1_start, y1_start, _, _ = all_lines[0]
             _, _, x2_end, y2_end = all_lines[-1]
             
+            # Draw a green line connecting the top and bottom points
             cv2.line(img_lines, (x1_start, y1_start), (x2_end, y2_end), (0, 255, 0), 3)  # Green line
             
             # Calculate angle between connected line and vertical
@@ -466,18 +557,23 @@ def process_image(image, final_steering=None, raw_angle=None):
             # Convert connected angle to be relative to vertical
             connected_vertical_angle = connected_angle - (np.pi/2)
             
-            # Use the connected line's angle if it's significant
+            # Use the connected line's angle if it's significant length
+            # This helps to get a more stable line direction
             if longest_length > 50:
                 best_angle = connected_vertical_angle
                 raw_line_angle = connected_vertical_angle
 
+        # Update the last known angle
         last_angle = best_angle
     else:
-        best_angle = 0.0  # Default to straight if no lines detected
+        # Default to straight if no lines detected
+        # This handles the case of intersections where road has no yellow lines
+        best_angle = 0.0  
         raw_line_angle = 0.0
         
     # Calculate steering angle with position adjustment
-    # Positive = turn right, Negative = turn left
+    # Positive = turn right (clockwise), Negative = turn left (counter-clockwise)
+    # The position_correction adds a small adjustment based on lateral position of the lane
     position_correction = lane_position_offset * 0.001  # Small correction based on position
     
     # Steering is opposite to line lean
@@ -528,7 +624,7 @@ def process_image(image, final_steering=None, raw_angle=None):
     cv2.ellipse(img_lines, (center_x, center_y), (radius, radius), 
                 0, start_angle, end_angle, arc_color, 2)
     
-    if best_angle:
+    if best_angle is not None:
         vertical_relative_angle = best_angle
         vertical_relative_angle_degrees = np.degrees(vertical_relative_angle)
         # Display raw angle
@@ -548,7 +644,18 @@ def process_image(image, final_steering=None, raw_angle=None):
     offset_position = (center_x - 80, center_y - 10)
     cv2.putText(img_lines, offset_text, offset_position, 
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1, cv2.LINE_AA)
-
+    
+    # Display zebra crossing indicator
+    if on_zebra_crossing:
+        zebra_text = "ZEBRA CROSSING"
+        cv2.rectangle(img_lines, (center_x - 60, center_y - 45), (center_x + 60, center_y - 25), (0, 0, 0), -1)
+        cv2.putText(img_lines, zebra_text, (center_x - 55, center_y - 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1, cv2.LINE_AA)
+        
+        # When on a zebra crossing, we should maintain previous steering direction
+        # to ensure stability while crossing
+        steering_angle = steering_angle * 0.3 + last_angle * 0.7
+    
     # Indicate if showing final vs raw steering
     if final_steering is not None:
         cv2.putText(img_lines, "FINAL", (center_x - 20, center_y + 25), 
@@ -621,29 +728,59 @@ def main():
 
     display_img = Display("display_image")
 
+    # Initialize keyboard for user input
     keyboard = Keyboard()
     keyboard.enable(timestep)
 
-    speed = 80  # Moderate speed for testing
+    # Controller and driving parameters
+    CRUISE_SPEED = 80  # Moderate speed for testing
+    
+    # PID controller constants
+    STEERING_MAX = 0.75
+    DEAD_ZONE = 0.05
+    SMOOTHING = 0.1
+    
+    # Angle control parameters
+    ANGLE_KP = 0.05
+    ANGLE_KI = 0.05
+    ANGLE_KD = 0.07
+    
+    # Position control parameters
+    POSITION_KP = 0.5
+    POSITION_KI = 0.05
+    POSITION_KD = 0.2
+    
+    # Balance between position and angle control (0.7 = 70% position, 30% angle)
+    INITIAL_POSITION_WEIGHT = 0.7
+    
+    # Initialize PID monitor for real-time visualization
     pid_monitor = PIDMonitor()
     
-    # Initialize hybrid controller with position-heavy weights
+    # Initialize hybrid controller with defined parameters
     controller = SteeringController(
-        max_steering_angle=0.75, dead_zone=0.05, 
-        Kp_angle=0.3, Ki_angle=0.05, Kd_angle=0.07,
-        Kp_position=0.5, Ki_position=0.05, Kd_position=0.2, 
-        position_weight=0.7,  # 70% position, 30% angle
-        smoothing=0.1,
+        max_steering_angle=STEERING_MAX, 
+        dead_zone=DEAD_ZONE, 
+        Kp_angle=ANGLE_KP, 
+        Ki_angle=ANGLE_KI, 
+        Kd_angle=ANGLE_KD,
+        Kp_position=POSITION_KP, 
+        Ki_position=POSITION_KI, 
+        Kd_position=POSITION_KD, 
+        position_weight=INITIAL_POSITION_WEIGHT,
+        smoothing=SMOOTHING,
         monitor=pid_monitor
     )
 
     # Update global position_weight to match controller's initial value
     position_weight = controller.position_weight
 
-    print("Hybrid Position+Angle Controller active")
-    print("Position weight: 70%, Angle weight: 30%")
-    print("Press 'P' to increase position influence")
-    print("Press 'A' to increase angle influence")
+    # Display controller information and user instructions
+    print("\n== Hybrid Position+Angle Controller ==")
+    print(f"Position weight: {int(position_weight*100)}%, Angle weight: {int((1-position_weight)*100)}%")
+    print("User controls:")
+    print("  'P' - Increase position influence")
+    print("  'A' - Increase angle influence")
+    print("  'S' - Save screenshot")
 
     while robot.step() != -1:
         image = get_image(camera)
@@ -682,7 +819,7 @@ def main():
 
         # Apply steering angle to vehicle
         driver.setSteeringAngle(steering_angle)
-        driver.setCruisingSpeed(speed)
+        driver.setCruisingSpeed(CRUISE_SPEED)
 
 
 if __name__ == "__main__":
