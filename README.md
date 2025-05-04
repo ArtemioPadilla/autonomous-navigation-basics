@@ -7,9 +7,9 @@ Basics of Autonomous Navigation
 .
 ├── README.md
 └── docs
-    ├── books/            # PDF and DOCX format books and chapters
-    ├── essays/           # Markdown essays in English and Spanish
-    │   └── env/          # AI-generated content versions
-    ├── papers/           # Academic and research papers in PDF format
-    └── readme.md         # This documentation file
+    ├── books/            # Books and chapters in PDF and DOCX formats
+    ├── essays/           # Essays in Markdown (English and Spanish)
+    │   └── env/          # AI-enhanced content versions
+    ├── papers/           # Research papers in PDF format
+    └── readme.md         # Documentation for the docs folder
 ```
